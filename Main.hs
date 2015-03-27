@@ -2,6 +2,8 @@
 
 
 import Text.PrettyPrint.Boxes
+import Data.Char(isSpace)
+import System.Process(readProcessWithExitCode)
 import qualified Data.Text as T
 import Data.Aeson (decode, Value(..), FromJSON(..), (.:))
 import Network.Wreq
@@ -11,6 +13,7 @@ import qualified Data.ByteString.Lazy as BL
 import Control.Monad(mzero)
 
 
+rstrip = reverse . dropWhile isSpace . reverse
 opts = defaults & header "Accept" .~ ["application/json"]
 
 getCircleBuildCollection :: IO (Maybe BuildCollection)
@@ -18,10 +21,10 @@ getCircleBuildCollection = do
   response <- getWith opts "https://circleci.com/api/v1/project/zephyr-dev/gust?circle-token=a5422c509e6c049514733030174a901e8cd17b3e"
   return . decodeBuildCollection $ (response ^. responseBody)
 
-data Build = Build { buildId :: Integer , status :: T.Text , branch :: T.Text} deriving (Show)
+data Build = Build { buildId :: Integer , status :: T.Text , branch :: T.Text, buildAuthor :: T.Text } deriving (Show)
 
 instance FromJSON Build where
-  parseJSON (Object v) = Build <$> v .: "build_num" <*> v .: "outcome" <*> v .: "branch"
+  parseJSON (Object v) = Build <$> v .: "build_num" <*> v .: "status" <*> v .: "branch" <*> v.: "author_name"
   parseJSON _  = mzero
 
 data BuildCollection = BuildCollection { builds :: [Build] } deriving(Show)
@@ -34,32 +37,32 @@ instance FromJSON BuildCollection where
 decodeBuildCollection :: BL.ByteString -> Maybe BuildCollection
 decodeBuildCollection = decode
 
-headerNames :: [String]
-headerNames = [ "Pair", "Branch", "Status", "Time" ]
-
-headerBox :: Box
-headerBox  = foldr (<+>) (text "") headerBoxes
-  where
-    headerBoxes :: [Box]
-    headerBoxes = map text headerNames 
-
 buildBox :: Build -> Box
-buildBox build = buildBranch <+> buildStatus <+> time --  <+> authors
+buildBox build = buildStatus <+> buildBranch
   where
-    {- authors :: Box -}
-    {- authors  = text . T.unpack $ authorName build -}
-    buildBranch :: Box
     buildBranch = text . T.unpack $ branch build
     buildStatus :: Box
     buildStatus  = text . T.unpack $ status build
-    time :: Box
-    time  = text "22:19"
 
-buildBoxes :: Maybe BuildCollection -> [Box]
-buildBoxes bc = case bc of
+buildBoxesForAuthor ::  Author -> Maybe BuildCollection -> [Box]
+buildBoxesForAuthor  author bc = case bc of
                      Nothing -> []
-                     Just blds -> map buildBox $ builds blds
+                     Just blds -> map buildBox $ buildsForAuthor blds
+                       where
+                         buildsForAuthor :: BuildCollection -> [Build]
+                         buildsForAuthor bldCollection = filter forAuthor $ builds bldCollection 
+                           where 
+                             forAuthor :: Build -> Bool
+                             forAuthor build = buildAuthor build == T.pack author
+
+type Author = String
+
+currentAuthors :: IO Author
+currentAuthors = do
+  (_, authors, _) <- readProcessWithExitCode "git" ["config", "user.name"] ""
+  return $ rstrip authors
 
 main = do 
   buildCollection <- getCircleBuildCollection 
-  printBox $ headerBox // (foldr (//) (text "") $ buildBoxes buildCollection )
+  authors <- currentAuthors
+  printBox $ foldr (//) (text "") $ buildBoxesForAuthor authors buildCollection
